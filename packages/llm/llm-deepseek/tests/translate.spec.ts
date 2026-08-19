@@ -347,4 +347,60 @@ describe('translate: defensive tool-call branches', () => {
     )))
     expect(chunks[1]).toEqual({ type: 'tool-call-delta', index: 0, id: 'c', argumentsDelta: '' })
   })
+
+  it('ignores empty id/name on continuation deltas so the first delta wins', async () => {
+    const chunks = await collect(translate(feed(
+      firstChunk,
+      {
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call_00_x',
+              type: 'function',
+              function: { name: 'read', arguments: '' },
+            }],
+          },
+        }],
+      },
+      // Gateways that serialize omitted fields as empty / null must not wipe
+      // the call identity captured above.
+      {
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: '',
+              function: { name: null, arguments: '{"path"' },
+            }],
+          },
+        }],
+      },
+      {
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: '',
+              function: { name: null, arguments: ':"./x"}' },
+            }],
+          },
+        }],
+      },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      DONE,
+    )))
+    expect(chunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      { type: 'tool-call-delta', index: 0, id: 'call_00_x', name: 'read', argumentsDelta: '' },
+      { type: 'tool-call-delta', index: 0, id: 'call_00_x', name: 'read', argumentsDelta: '{"path"' },
+      { type: 'tool-call-delta', index: 0, id: 'call_00_x', name: 'read', argumentsDelta: ':"./x"}' },
+      {
+        type: 'block-end',
+        index: 0,
+        block: { type: 'tool-call', id: 'call_00_x', name: 'read', arguments: '{"path":"./x"}' },
+      },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ])
+  })
 })

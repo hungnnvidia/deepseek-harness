@@ -156,8 +156,14 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
           toolBlocks.set(call.index, block)
           yield { type: 'block-start', index: block.index, blockType: 'tool-call' }
         }
-        if (call.id !== undefined) block.callId = call.id
-        if (call.function?.name !== undefined) block.name = call.function.name
+        // Some OpenAI-compatible gateways send explicit empty id/name on
+        // continuation deltas (`id: ""`, `name: null`) instead of omitting
+        // the fields. Those values are not informative and must not clobber
+        // the id/name captured from the first delta.
+        if (typeof call.id === 'string' && call.id.length > 0) block.callId = call.id
+        if (typeof call.function?.name === 'string' && call.function.name.length > 0) {
+          block.name = call.function.name
+        }
         const fragment = call.function?.arguments ?? ''
         block.text += fragment
         yield {
