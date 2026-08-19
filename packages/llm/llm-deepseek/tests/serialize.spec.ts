@@ -302,4 +302,52 @@ describe('review fixes: assistant content shapes', () => {
     })])
     expect(wire[0]).toMatchObject({ content: '' })
   })
+
+  it('replaces lone UTF-16 surrogates before they reach the wire', () => {
+    // JSON.stringify emits \uD980 for a lone surrogate; DeepSeek's parser
+    // rejects that escape with HTTP 400 and bricks every later turn that
+    // replays the poisoned session message.
+    const lone = 'before\uD980after'
+    const pair = 'emoji:\uD83D\uDE00'
+    const wire = serializeMessages([
+      createUserMessage({
+        content: [{ type: 'text', text: lone }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }),
+      createMessage({
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: `r${lone}` },
+          { type: 'tool-call', id: CallId(`id${lone}`), name: `n${lone}`, arguments: `{"x":"${lone}"}` },
+        ],
+        source: { kind: 'plugin', plugin: 'test' },
+      }),
+      createUserMessage({
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('c'),
+          toolName: 'f',
+          content: [{ type: 'text', text: `${lone}${pair}` }],
+        }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }),
+    ])
+    expect(wire[0]).toEqual({ role: 'user', content: 'before\uFFFDafter' })
+    expect(wire[1]).toMatchObject({
+      role: 'assistant',
+      content: '',
+      reasoning_content: 'rbefore\uFFFDafter',
+      tool_calls: [{
+        id: 'idbefore\uFFFDafter',
+        function: { name: 'nbefore\uFFFDafter', arguments: '{"x":"before\uFFFDafter"}' },
+      }],
+    })
+    expect(wire[2]).toEqual({
+      role: 'tool',
+      tool_call_id: 'c',
+      content: 'before\uFFFDafteremoji:\uD83D\uDE00',
+    })
+    // Valid JSON must not contain a raw lone-surrogate escape after stringify.
+    expect(JSON.stringify(wire)).not.toMatch(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/)
+  })
 })
