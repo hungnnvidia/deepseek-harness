@@ -11,6 +11,36 @@ import { contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import type { WireMessage, WireRequest, WireTool } from './types.ts'
 
+/**
+ * Replace unpaired UTF-16 surrogates with U+FFFD so `JSON.stringify` never
+ * emits lone `\uD800`–`\uDFFF` escapes. DeepSeek's request parser rejects those
+ * escapes with HTTP 400, and a poisoned tool result in the session log bricks
+ * every later turn.
+ * @param text - any string that will be placed on the chat-completions wire.
+ * @returns the same text with lone surrogates replaced; valid pairs kept.
+ */
+export function sanitizeSurrogates(text: string): string {
+  let out = ''
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    const current = text.charAt(i)
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const nextCode = i + 1 < text.length ? text.charCodeAt(i + 1) : 0
+      if (nextCode >= 0xDC00 && nextCode <= 0xDFFF) {
+        out += current + text.charAt(i + 1)
+        i++
+      } else {
+        out += '\uFFFD'
+      }
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      out += '\uFFFD'
+    } else {
+      out += current
+    }
+  }
+  return out
+}
+
 /** Adapter-level request defaults (from plugin config). */
 export interface RequestDefaults {
   thinking?: 'enabled' | 'disabled' | undefined
@@ -54,10 +84,12 @@ function resolveThinking(options: GenerateOptions, defaults: RequestDefaults): R
 
 /** Join the text blocks of a message (used for user/tool-result content). */
 function flattenText(blocks: ContentBlock[]): string {
-  return blocks
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
-    .join('')
+  return sanitizeSurrogates(
+    blocks
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join(''),
+  )
 }
 
 /** Reject core image content before any text-flattening path can silently erase it. */
@@ -70,16 +102,21 @@ function assertTextOnly(blocks: readonly ContentBlock[]): void {
 /** Serialize one assistant message (text + reasoning + tool calls). */
 function serializeAssistant(message: Message): WireMessage {
   const text = flattenText(message.content)
-  const reasoning = message.content
-    .filter(block => block.type === 'reasoning')
-    .map(block => block.text)
-    .join('')
+  const reasoning = sanitizeSurrogates(
+    message.content
+      .filter(block => block.type === 'reasoning')
+      .map(block => block.text)
+      .join(''),
+  )
   const toolCalls = message.content
     .filter(block => block.type === 'tool-call')
     .map(block => ({
-      id: block.id,
+      id: sanitizeSurrogates(block.id),
       type: 'function' as const,
-      function: { name: block.name, arguments: block.arguments },
+      function: {
+        name: sanitizeSurrogates(block.name),
+        arguments: sanitizeSurrogates(block.arguments),
+      },
     }))
 
   return {
@@ -131,7 +168,7 @@ export function serializeMessages(messages: Message[]): WireMessage[] {
     for (const result of toolResults) {
       wire.push({
         role: 'tool',
-        tool_call_id: result.toolCallId,
+        tool_call_id: sanitizeSurrogates(result.toolCallId),
         // Empty tool output still needs SOME content on the wire.
         content: flattenText(result.content) || '(no output)',
       })
@@ -154,15 +191,15 @@ export function serializeRequest(
 ): WireRequest {
   const messages: WireMessage[] = []
   if (options.system !== undefined) {
-    messages.push({ role: 'system', content: options.system })
+    messages.push({ role: 'system', content: sanitizeSurrogates(options.system) })
   }
   messages.push(...serializeMessages(options.messages))
 
   const tools: WireTool[] | undefined = options.tools?.map(tool => ({
     type: 'function',
     function: {
-      name: tool.name,
-      description: tool.description,
+      name: sanitizeSurrogates(tool.name),
+      description: sanitizeSurrogates(tool.description),
       parameters: tool.parameters,
     },
   }))
