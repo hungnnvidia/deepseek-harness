@@ -515,6 +515,20 @@ describe('OutputCollector', () => {
     expect(out.spillPath).toBeUndefined()
   })
 
+  it('disables spill and keeps the memory tail when the spill directory is missing', () => {
+    const missing = join(tmpdir(), `dsh-subprocess-missing-spill-${Date.now()}-${Math.random()}`)
+    const collector = new OutputCollector(4, 100, 'missing-dir', missing)
+    expect(() => {
+      collector.push(Buffer.from('aaaa'))
+      collector.push(Buffer.from('bbbb'))
+      collector.push(Buffer.from('cccc'))
+    }).not.toThrow()
+    const out = collector.finalize()
+    expect(out.text).toBe('cccc')
+    expect(out.truncated).toBe(true)
+    expect(out.spillPath).toBeUndefined()
+  })
+
   it('contains cleanup failures while disabling an oversize spill', () => {
     const collector = new OutputCollector(4, 8, 'cleanup-fail', spillDir)
     collector.push(Buffer.from('aaaa'))

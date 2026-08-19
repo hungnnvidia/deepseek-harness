@@ -158,18 +158,25 @@ export class OutputCollector {
       this.discardSpill()
       return
     }
-    if (this.spillFd === undefined) {
-      // Random suffix + O_EXCL + no-follow-equivalent ('wx' fails on any
-      // existing path, symlink or not) + owner-only mode: defeats spill-path
-      // prediction and symlink planting in shared tmp dirs.
-      this.spillFile = join(
-        this.spillDir,
-        `dsh-subprocess-${process.pid}-${++spillCounter}-${randomBytes(6).toString('hex')}-${this.label}.log`,
-      )
-      this.spillFd = openSync(this.spillFile, 'wx', 0o600)
-      for (const prior of this.chunks) writeSync(this.spillFd, prior)
+    try {
+      if (this.spillFd === undefined) {
+        // Random suffix + O_EXCL + no-follow-equivalent ('wx' fails on any
+        // existing path, symlink or not) + owner-only mode: defeats spill-path
+        // prediction and symlink planting in shared tmp dirs.
+        this.spillFile = join(
+          this.spillDir,
+          `dsh-subprocess-${process.pid}-${++spillCounter}-${randomBytes(6).toString('hex')}-${this.label}.log`,
+        )
+        this.spillFd = openSync(this.spillFile, 'wx', 0o600)
+        for (const prior of this.chunks) writeSync(this.spillFd, prior)
+      }
+      writeSync(this.spillFd, chunk)
+    } catch {
+      // Missing spill dir, disk full, or race after an early child death must
+      // not escape a stream 'data' callback and take down the whole process.
+      // Fall back to the bounded in-memory tail only.
+      this.discardSpill()
     }
-    writeSync(this.spillFd, chunk)
   }
 
   /** Stop spilling and remove the file once it can no longer hold the complete stream. */
@@ -364,6 +371,9 @@ export function spawnSubprocess(spec: SubprocessSpawnSpec, internals: SpawnInter
     if (!isCollect(mode) || stream === null) return undefined
     const collector = new OutputCollector(mode.maxBytes, mode.spill?.maxBytes, label, spillDir)
     stream.on('data', (chunk: Buffer) => { collector.push(chunk) })
+    // Early child death / broken pipe must not surface as an uncaught 'error'
+    // on the process; output collection is best-effort beside exit status.
+    stream.on('error', () => { /* retain whatever the collector already has */ })
     return collector
   }
   const stdoutCollector = collectStream(outMode, child.stdout, 'stdout')
